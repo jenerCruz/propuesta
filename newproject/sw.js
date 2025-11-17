@@ -1,55 +1,76 @@
-const CACHE_NAME = "pwa-sales-v1";
+// Nombre del caché
+const CACHE_NAME = "ventasapp-cache-v1";
 
-const ASSETS = [
+// Archivos obligatorios para trabajar offline
+const APP_SHELL = [
   "./",
   "./index.html",
-  "./app.js",
   "./manifest.json",
+
+  // CSS
   "./assets/css/tailwind.min.css",
-  "./assets/js/lucide.min.js"
+
+  // JS internos
+  "./assets/js/chart.min.js",
+  "./assets/js/lucide.min.js",
+
+  // Íconos
+  "./assets/icons/icon-192.png",
+  "./assets/icons/icon-512.png"
 ];
 
-// INSTALACIÓN
-self.addEventListener("install", (event) => {
-  self.skipWaiting();
+// Instalación del Service Worker
+self.addEventListener("install", event => {
+  console.log("[SW] Instalando service worker y haciendo precache...");
+
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS);
+    caches.open(CACHE_NAME).then(cache => {
+      return cache.addAll(APP_SHELL);
     })
   );
+
+  self.skipWaiting();
 });
 
-// ACTIVACIÓN
-self.addEventListener("activate", (event) => {
+// Activación
+self.addEventListener("activate", event => {
+  console.log("[SW] Activando service worker...");
+
+  // Limpiar caches viejos
   event.waitUntil(
-    caches.keys().then((keys) => {
+    caches.keys().then(keys => {
       return Promise.all(
-        keys.map((key) => key !== CACHE_NAME && caches.delete(key))
+        keys.map(key => {
+          if (key !== CACHE_NAME) {
+            console.log("[SW] Cache antiguo eliminado:", key);
+            return caches.delete(key);
+          }
+        })
       );
     })
   );
+
   self.clients.claim();
 });
 
-// FETCH (cache-first)
-self.addEventListener("fetch", (event) => {
+// Fetch → Estrategia: Cache first, fallback to network
+self.addEventListener("fetch", event => {
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return (
-        cached ||
-        fetch(event.request)
-          .then((resp) => {
-            // solo cachea GET
-            if (event.request.method === "GET" && resp.ok) {
-              const clone = resp.clone();
-              caches.open(CACHE_NAME).then((cache) => {
-                cache.put(event.request, clone);
-              });
-            }
-            return resp;
-          })
-          .catch(() => cached)
-      );
+    caches.match(event.request).then(cached => {
+      if (cached) return cached;
+
+      return fetch(event.request)
+        .then(response => {
+          // Guardar en cache dinámicamente
+          return caches.open(CACHE_NAME).then(cache => {
+            cache.put(event.request, response.clone());
+            return response;
+          });
+        })
+        .catch(() => {
+          // Opcional: puedes devolver un offline.html aquí
+          return caches.match("./index.html");
+        });
     })
   );
 });
