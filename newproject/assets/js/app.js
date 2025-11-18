@@ -521,3 +521,21 @@ function showToast(msg, err = false) {
         t.classList.add("opacity-0", "translate-y-10");
     }, 2000);
 }
+/* ============================================================
+   FUSIÓN DE DATOS (UTILIDAD)
+   ============================================================ */
+function mergeArrays(remoteArr = [], localArr = []) {
+    const map = new Map();
+
+    // Primero remoto
+    remoteArr.forEach(item => {
+        if (item && item.id !== undefined) map.set(item.id, item);
+    });
+
+    // Luego local (sobrescribe si hay conflicto)
+    localArr.forEach(item => {
+        if (item && item.id !== undefined) map.set(item.id, item);
+    });
+
+    return Array.from(map.values());
+}
