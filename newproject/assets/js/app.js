@@ -1,12 +1,3 @@
-/* ============================================================
-   app.js – Lógica completa de la aplicación
-   Para: Panel de Ventas y Metas (modo PWA offline)
-   Autor: Eduardo + ChatGPT
-   ============================================================ */
-
-/* ============================================================
-   DATOS MAESTROS
-   ============================================================ */
 const SUCURSALES = [
     "Coppel 363", "Coppel 385", "Coppel 716",
     "Elektra 218", "Chedraui 23", "Chedraui 99", "Chedraui 105"
@@ -30,7 +21,8 @@ const DB_VERSION = 1;
 const STORES = {
     PROMOTORES: "promotores",
     METAS: "metas",
-    VENTAS: "ventas"
+    VENTAS: "ventas",
+    CONFIG: "config"
 };
 let promotoresCache = [];
 
@@ -81,6 +73,11 @@ function initDB() {
             const store = db.createObjectStore(STORES.VENTAS, { keyPath: "id", autoIncrement: true });
             store.createIndex("fecha", "fecha");
             store.createIndex("sucursal", "sucursal");
+        }
+
+        // CONFIG PARA GIST
+        if (!db.objectStoreNames.contains(STORES.CONFIG)) {
+            db.createObjectStore(STORES.CONFIG, { keyPath: "id" });
         }
     };
 }
@@ -521,21 +518,188 @@ function showToast(msg, err = false) {
         t.classList.add("opacity-0", "translate-y-10");
     }, 2000);
 }
+
 /* ============================================================
    FUSIÓN DE DATOS (UTILIDAD)
    ============================================================ */
 function mergeArrays(remoteArr = [], localArr = []) {
     const map = new Map();
 
-    // Primero remoto
     remoteArr.forEach(item => {
         if (item && item.id !== undefined) map.set(item.id, item);
     });
 
-    // Luego local (sobrescribe si hay conflicto)
     localArr.forEach(item => {
         if (item && item.id !== undefined) map.set(item.id, item);
     });
 
     return Array.from(map.values());
+}
+
+/* ============================================================
+   CONFIG + SINCRONIZACIÓN GIST
+   ============================================================ */
+
+async function loadGistConfigLocal() {
+    try {
+        const cfgs = await getAllFromDB(STORES.CONFIG) || [];
+        const gistId = cfgs.find(c => c.id === 'gistId')?.value || '';
+        const gistToken = cfgs.find(c => c.id === 'gistToken')?.value || '';
+        document.getElementById('gist-id').value = gistId;
+        document.getElementById('gist-token').value = gistToken;
+        return { gistId, gistToken };
+    } catch (e) {
+        return { gistId:'', gistToken:'' };
+    }
+}
+
+async function saveGistConfig(gistId, gistToken) {
+    try {
+        const tx = db.transaction([STORES.CONFIG], 'readwrite');
+        const store = tx.objectStore(STORES.CONFIG);
+
+        await Promise.all([
+            store.put({ id:'gistId', value:gistId }),
+            store.put({ id:'gistToken', value:gistToken })
+        ]);
+
+        showToast("Configuración guardada.");
+    } catch (e) { 
+        console.error(e); 
+        showToast("Error guardando configuración.", true); 
+    }
+}
+
+async function syncFromGist() {
+    const cfg = await loadGistConfigLocal();
+    if (!cfg.gistId || !cfg.gistToken)
+        return showToast("Configura Gist ID y Token en Configuración.", true);
+
+    try {
+        showToast("Descargando desde Gist...");
+        const resp = await fetch(`https://api.github.com/gists/${cfg.gistId}`, {
+            headers: {
+                Authorization: `token ${cfg.gistToken}`,
+                Accept: 'application/vnd.github.v3+json'
+            }
+        });
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+        const gist = await resp.json();
+        const file = gist.files?.['ventas_data.json'];
+        if (!file?.content) throw new Error("ventas_data.json no encontrado en el Gist.");
+
+        const remote = JSON.parse(file.content);
+
+        if (remote.promotores) await replaceAll(STORES.PROMOTORES, remote.promotores);
+        if (remote.metas)       await replaceAll(STORES.METAS, remote.metas);
+        if (remote.ventas)      await replaceAll(STORES.VENTAS, remote.ventas);
+
+        showToast("Sincronización completada.");
+        startApp();
+
+    } catch (e) {
+        console.error(e);
+        showToast("Error sincronizando desde Gist: "+ (e.message||e), true);
+    }
+}
+
+/* ============================================================
+   SYNC TO GIST con FUSIÓN segura
+   ============================================================ */
+async function syncToGist() {
+    const cfg = await loadGistConfigLocal();
+    if (!cfg.gistId || !cfg.gistToken)
+        return showToast("Configura Gist ID y Token en Configuración.", true);
+
+    try {
+        showToast("Fusión local + remota (Gist)...");
+
+        // 1. Local
+        const localPromotores = await getAllFromDB(STORES.PROMOTORES);
+        const localMetas      = await getAllFromDB(STORES.METAS);
+        const localVentas     = await getAllFromDB(STORES.VENTAS);
+
+        // 2. Remoto
+        const resp = await fetch(`https://api.github.com/gists/${cfg.gistId}`, {
+            headers: {
+                Authorization: `token ${cfg.gistToken}`,
+                Accept: "application/vnd.github.v3+json"
+            }
+        });
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+        const gist = await resp.json();
+        let remote = { promotores: [], metas: [], ventas: [] };
+
+        if (gist.files?.["ventas_data.json"]?.content) {
+            try { remote = JSON.parse(gist.files["ventas_data.json"].content); }
+            catch { console.warn("JSON remoto inválido"); }
+        }
+
+        // 3. Merge
+        const mergedPromotores = mergeArrays(remote.promotores, localPromotores);
+        const mergedMetas      = mergeArrays(remote.metas, localMetas);
+        const mergedVentas     = mergeArrays(remote.ventas, localVentas);
+
+        // 4. Subir
+        const payload = {
+            description: "Datos VentasApp (Merge)",
+            files: {
+                "ventas_data.json": {
+                    content: JSON.stringify(
+                        {
+                            promotores: mergedPromotores,
+                            metas: mergedMetas,
+                            ventas: mergedVentas
+                        },
+                        null,
+                        2
+                    )
+                }
+            }
+        };
+
+        const upload = await fetch(`https://api.github.com/gists/${cfg.gistId}`, {
+            method: "PATCH",
+            headers: {
+                Authorization: `token ${cfg.gistToken}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!upload.ok) throw new Error(`HTTP ${upload.status}`);
+
+        showToast("Fusión completada y subida correctamente.");
+
+    } catch (e) {
+        console.error(e);
+        showToast("Error subiendo a Gist: " + (e.message || e), true);
+    }
+}
+
+/* ============================================================
+   REEMPLAZAR TODO EN UNA STORE
+   ============================================================ */
+function replaceAll(storeName, dataArray) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction([storeName], 'readwrite');
+        const store = tx.objectStore(storeName);
+
+        const clearReq = store.clear();
+        clearReq.onsuccess = () => {
+            let i = 0;
+            (function addNext() {
+                if (i >= dataArray.length) { resolve(); return; }
+                const item = dataArray[i++];
+                const addReq = store.add(item);
+                addReq.onsuccess = addNext;
+                addReq.onerror = e => reject(e.target.error);
+            })();
+        };
+        clearReq.onerror = e => reject(e.target.error);
+    });
 }
